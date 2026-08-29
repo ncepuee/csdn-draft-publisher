@@ -1,0 +1,8 @@
+name: csdn-publisher
+channels:
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - playwright==1.62.0
