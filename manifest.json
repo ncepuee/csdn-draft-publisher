@@ -1,9 +1,10 @@
 {
   "id": "csdn-draft-publisher",
   "name": "CSDN Draft Publisher",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "minAppVersion": "1.4.0",
-  "description": "以卡片方式管理 CSDN 草稿，并支持导入 Obsidian 本地编辑后回写草稿。",
+  "description": "Sync Obsidian Markdown notes to CSDN blog drafts via a local Playwright bridge, with multi-account support, draft management, and write-back editing.",
   "author": "HZB",
+  "authorUrl": "https://github.com/ncepuee",
   "isDesktopOnly": true
 }
