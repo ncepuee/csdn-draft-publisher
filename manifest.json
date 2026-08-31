@@ -1,9 +1,9 @@
 {
   "id": "csdn-draft-publisher",
   "name": "CSDN Draft Publisher",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "minAppVersion": "1.4.0",
-  "description": "Sync Obsidian Markdown notes to CSDN blog drafts via a local Playwright bridge, with multi-account support, draft management, and write-back editing.",
+  "description": "Sync Markdown notes to CSDN blog drafts via a local Playwright bridge, with multi-account support, draft management, and write-back editing.",
   "author": "HZB",
   "authorUrl": "https://github.com/ncepuee",
   "isDesktopOnly": true
