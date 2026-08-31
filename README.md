@@ -3,6 +3,12 @@
 <p align="center">An <a href="https://obsidian.md">Obsidian</a> plugin that syncs the current Markdown note to a <a href="https://www.csdn.net">CSDN</a> blog draft, and lets you manage existing drafts without leaving the vault.</p>
 
 <p align="center">
+  <img alt="ZCode Code Support" src="https://img.shields.io/badge/ZCode-Code_Support-orange">
+  <a href="https://open.bigmodel.cn/"><img alt="GLM-5.3-Flash Agent" src="https://img.shields.io/badge/GLM--5.3--Flash-Agent_used%400.6.1-2563EB"></a>
+  <a href="https://github.com/ncepuee/csdn-draft-publisher"><img alt="GitHub stars" src="https://img.shields.io/github/stars/ncepuee/csdn-draft-publisher?logo=github&amp;cacheSeconds=86400"></a>
+</p>
+
+<p align="center">
   <a href="https://github.com/ncepuee/csdn-draft-publisher/releases"><img alt="Release" src="https://img.shields.io/github/v/release/ncepuee/csdn-draft-publisher"></a>
   <a href="https://github.com/ncepuee/csdn-draft-publisher/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/ncepuee/csdn-draft-publisher/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://github.com/ncepuee/csdn-draft-publisher/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/ncepuee/csdn-draft-publisher"></a>
