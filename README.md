@@ -10,6 +10,8 @@
 
 ## What it does
 
+> **Full usage documentation lives in the [Wiki](https://github.com/ncepuee/csdn-draft-publisher/wiki)** — including a [中文快速上手指南](https://github.com/ncepuee/csdn-draft-publisher/wiki/%E4%B8%AD%E6%96%87%E4%BD%BF%E7%94%A8%E6%8C%87%E5%8D%97).
+
 - Command palette: **Sync current note to CSDN draft**
 - Ribbon icon menu: sync the current note, open the note in the CSDN editor, or open the draft manager
 - Reads `title`, `description` / `summary`, `tags`, and `cover` / `image` from YAML frontmatter
