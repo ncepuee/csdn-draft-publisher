@@ -1,6 +1,12 @@
-# CSDN Draft Publisher
+<h1 align="center">CSDN Draft Publisher</h1>
 
-An [Obsidian](https://obsidian.md) plugin that syncs the current Markdown note to a [CSDN](https://www.csdn.net) blog draft, and lets you manage existing drafts without leaving the vault.
+<p align="center">An <a href="https://obsidian.md">Obsidian</a> plugin that syncs the current Markdown note to a <a href="https://www.csdn.net">CSDN</a> blog draft, and lets you manage existing drafts without leaving the vault.</p>
+
+<p align="center">
+  <a href="https://github.com/ncepuee/csdn-draft-publisher/releases"><img alt="Release" src="https://img.shields.io/github/v/release/ncepuee/csdn-draft-publisher"></a>
+  <a href="https://github.com/ncepuee/csdn-draft-publisher/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/ncepuee/csdn-draft-publisher/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/ncepuee/csdn-draft-publisher/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/ncepuee/csdn-draft-publisher"></a>
+</p>
 
 ## What it does
 
@@ -72,6 +78,10 @@ The repository root doubles as the plugin folder:
 - `manifest.json`, `versions.json` — plugin metadata for the Obsidian community directory.
 
 Install a dev copy by symlinking or copying this folder to `<vault>/.obsidian/plugins/csdn-draft-publisher/` and reloading Obsidian.
+
+## Contributing
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for the local check commands, branch and commit conventions, and how releases are cut ([RELEASE-CHECKLIST.md](./RELEASE-CHECKLIST.md)). Bug reports and feature requests use the issue templates; security issues go through [SECURITY.md](./SECURITY.md).
 
 ## License
 
