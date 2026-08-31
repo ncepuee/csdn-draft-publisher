@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Syntax check plugin source
+        run: node --check main.js
+
+      - name: Compile bridge script
+        run: python -m py_compile csdn_bridge.py
+
+      - name: Verify embedded bridge matches source
+        run: |
+          node -e "
+          const fs = require('fs');
+          const main = fs.readFileSync('main.js', 'utf8');
+          const m = main.match(/EMBEDDED_BRIDGE_SCRIPT_B64 =\s*\"([^\"]+)\"/);
+          if (!m) { console.error('EMBEDDED_BRIDGE_SCRIPT_B64 missing'); process.exit(1); }
+          const decoded = Buffer.from(m[1], 'base64');
+          const orig = fs.readFileSync('csdn_bridge.py');
+          if (!decoded.equals(orig)) {
+            console.error('embedded bridge script is stale; regenerate the base64 constant (see CONTRIBUTING.md)');
+            process.exit(1);
+          }
+          console.log('embedded bridge OK (' + orig.length + ' bytes)');
+          "
+
+      - name: Validate manifest
+        run: |
+          node -e "
+          const fs = require('fs');
+          const m = JSON.parse(fs.readFileSync('manifest.json', 'utf8'));
+          const required = ['id', 'name', 'version', 'minAppVersion', 'description', 'author', 'isDesktopOnly'];
+          for (const key of required) {
+            if (!(key in m)) { console.error('manifest missing field: ' + key); process.exit(1); }
+          }
+          if (!/^\d+\.\d+\.\d+$/.test(m.version)) { console.error('version must be x.y.z'); process.exit(1); }
+          if (m.id.includes('obsidian')) { console.error('plugin id must not contain obsidian'); process.exit(1); }
+          if (m.description.length > 250) { console.error('description exceeds 250 characters'); process.exit(1); }
+          if (/\bObsidian\b/.test(m.description)) { console.error('description must not include the word Obsidian'); process.exit(1); }
+          console.log('manifest OK (v' + m.version + ')');
+          "
+
+      - name: Verify versions.json tracks manifest version
+        run: |
+          node -e "
+          const fs = require('fs');
+          const m = JSON.parse(fs.readFileSync('manifest.json', 'utf8'));
+          const v = JSON.parse(fs.readFileSync('versions.json', 'utf8'));
+          if (v[m.version] !== m.minAppVersion) {
+            console.error('versions.json has no entry for ' + m.version);
+            process.exit(1);
+          }
+          console.log('versions.json OK');
+          "
+
+      - name: Verify tag matches manifest version
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          VERSION=$(node -p "JSON.parse(require('fs').readFileSync('manifest.json','utf8')).version")
+          if [ "$RELEASE_TAG" != "$VERSION" ]; then
+            echo "tag $RELEASE_TAG does not match manifest version $VERSION"
+            exit 1
+          fi
+          echo "tag matches manifest version ($VERSION)"

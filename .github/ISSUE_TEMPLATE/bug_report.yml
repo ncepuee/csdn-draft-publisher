@@ -1,0 +1,48 @@
+name: Bug report
+description: Report a reproducible problem
+labels: [bug, triage]
+body:
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Start from a clean state, one step per line, with exact commands.
+      placeholder: |
+        1. Enable the plugin / toggle "Enable bridge service"
+        2. Run the command ...
+        3. Error ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: Include the plugin version (Settings → Community plugins, or manifest.json) and the Python version used by the bridge.
+      placeholder: |
+        - OS:
+        - Plugin version:
+        - Obsidian version:
+        - Python version (bridge interpreter):
+        - Browser: Playwright bundled Chromium
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log excerpts
+      description: Paste only relevant, sanitized fragments. Never include credentials, tokens, or full request headers.
+  - type: checkboxes
+    id: sanity
+    attributes:
+      label: Confirmations
+      options:
+        - label: I have sanitized the logs and included no credentials
+          required: true
+        - label: I have searched existing issues and found no duplicate
+          required: true
