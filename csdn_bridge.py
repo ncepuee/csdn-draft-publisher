@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import threading
 import time
 import traceback
@@ -21,16 +22,25 @@ from typing import Any
 from urllib.parse import urlparse
 
 
+def _default_app_data_dir() -> Path:
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share")))
+    return base / "CSDN-Draft-Publisher"
+
+
 HOST = "127.0.0.1"
 PORT = 8765
-BRIDGE_API_VERSION = "0.5.0"
+BRIDGE_API_VERSION = "0.6.0"
 EDITOR_URL = "https://editor.csdn.net/md/"
 MANAGE_URL = "https://mp.csdn.net/mp_blog/manage/article"
-PROFILE_DIR = Path(
-    os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
-) / "CSDN-Draft-Publisher" / "playwright-profile"
-PROFILE_ROOT = PROFILE_DIR.parent / "profiles"
-LOG_FILE = PROFILE_DIR.parent / "bridge.log"
+APP_DATA_DIR = _default_app_data_dir()
+PROFILE_DIR = APP_DATA_DIR / "playwright-profile"
+PROFILE_ROOT = APP_DATA_DIR / "profiles"
+LOG_FILE = APP_DATA_DIR / "bridge.log"
 SYNC_LOCK = threading.Lock()
 ACCOUNT_STATE_LOCK = threading.Lock()
 ACCOUNT_STATES: dict[str, dict[str, Any]] = {}
@@ -333,12 +343,29 @@ def extract_article_id(url: str) -> str | None:
     return match.group(1) if match else None
 
 
-def manage_page_for_account(playwright: Any, account_id: str) -> tuple[Any, Any]:
+def find_drafts_tab(page: Any) -> Any:
+    named_tab = page.get_by_role("tab", name=re.compile(r"草稿")).first
+    try:
+        if named_tab.count():
+            return named_tab
+    except Exception:
+        pass
+    tabs = page.get_by_role("tab")
+    if tabs.count() < 5:
+        raise RuntimeError("CSDN 内容管理页面未加载完整，无法定位草稿箱。")
+    return tabs.nth(4)
+
+
+def manage_page_for_account(
+    playwright: Any,
+    account_id: str,
+    headless: bool = False,
+) -> tuple[Any, Any]:
     profile_dir = profile_dir_for_account(account_id)
     profile_dir.mkdir(parents=True, exist_ok=True)
     context = playwright.chromium.launch_persistent_context(
         user_data_dir=str(profile_dir),
-        headless=False,
+        headless=headless,
         viewport={"width": 1440, "height": 1000},
         permissions=["clipboard-read", "clipboard-write"],
     )
@@ -352,6 +379,45 @@ def manage_page_for_account(playwright: Any, account_id: str) -> tuple[Any, Any]
         raise
 
 
+def verify_account_session(account_id: str) -> dict[str, Any]:
+    """Silently check whether the saved Playwright profile still has a valid CSDN session."""
+    normalized = normalize_account_id(account_id)
+    profile_dir = profile_dir_for_account(normalized)
+    if not profile_dir.exists():
+        set_account_state(normalized, "logged_out", "尚未登录（本地无登录缓存）")
+        return account_state(normalized)
+    if not has_playwright():
+        set_account_state(normalized, "error", "未安装 Playwright，无法验证登录态")
+        return account_state(normalized)
+
+    from playwright.sync_api import sync_playwright
+
+    try:
+        with sync_playwright() as playwright:
+            context = playwright.chromium.launch_persistent_context(
+                user_data_dir=str(profile_dir),
+                headless=True,
+                viewport={"width": 1440, "height": 1000},
+            )
+            try:
+                page = context.pages[0] if context.pages else context.new_page()
+                page.goto(EDITOR_URL, wait_until="domcontentloaded", timeout=25000)
+                page.wait_for_timeout(2500)
+                if "passport.csdn.net" in page.url or "login" in page.url.lower():
+                    set_account_state(normalized, "logged_out", "登录态已失效，请重新登录")
+                elif page.locator(
+                    '.article-bar__title-display, input.article-bar__title, .editor__inner[contenteditable="true"]'
+                ).count() > 0:
+                    set_account_state(normalized, "logged_in", "登录态有效（已检测到 CSDN 编辑器）")
+                else:
+                    set_account_state(normalized, "logged_out", "未检测到 CSDN 编辑器，可能需要重新登录")
+            finally:
+                context.close()
+    except Exception as error:
+        set_account_state(normalized, "error", f"登录态检查失败：{error}")
+    return account_state(normalized)
+
+
 def read_drafts(payload: dict[str, Any]) -> dict[str, Any]:
     if not has_playwright():
         raise RuntimeError("未安装 Playwright，请先安装依赖。")
@@ -361,19 +427,18 @@ def read_drafts(payload: dict[str, Any]) -> dict[str, Any]:
     page_number = max(1, min(int(payload.get("page", 1)), 1000))
     keyword = str(payload.get("keyword", "")).strip()
     page_size = max(1, min(int(payload.get("page_size", 20)), 50))
+    headless = str(payload.get("headless", "true")).lower() not in ("0", "false", "no")
 
     with sync_playwright() as playwright:
-        context, page = manage_page_for_account(playwright, account_id)
+        context, page = manage_page_for_account(playwright, account_id, headless=headless)
         try:
-            tabs = page.get_by_role("tab")
-            if tabs.count() < 5:
-                raise RuntimeError("CSDN 内容管理页面未加载完整，无法定位草稿箱。")
+            drafts_tab = find_drafts_tab(page)
             try:
                 with page.expect_response(
                     lambda response: article_list_response(response),
                     timeout=60000,
                 ):
-                    tabs.nth(4).click()
+                    drafts_tab.click()
             except Exception as error:
                 raise RuntimeError("CSDN 草稿箱接口响应超时，请确认登录态仍然有效。") from error
             wait_for_article_results(page)
@@ -432,7 +497,7 @@ def read_drafts(payload: dict[str, Any]) -> dict[str, Any]:
                 raise RuntimeError("CSDN 草稿列表加载失败，请稍后重试。")
             draft_count = None
             try:
-                draft_count_match = re.search(r"\((\d+)\)", tabs.nth(4).inner_text())
+                draft_count_match = re.search(r"\((\d+)\)", drafts_tab.inner_text())
                 draft_count = int(draft_count_match.group(1)) if draft_count_match else None
             except Exception:
                 pass
@@ -506,9 +571,9 @@ def delete_draft(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("无效的 CSDN 草稿文章 ID")
 
     with sync_playwright() as playwright:
-        context, page = manage_page_for_account(playwright, account_id)
+        context, page = manage_page_for_account(playwright, account_id, headless=True)
         try:
-            page.get_by_role("tab").nth(4).click()
+            find_drafts_tab(page).click()
             page.wait_for_timeout(1000)
             row = page.locator(
                 ".article-list-item-mp",
@@ -542,9 +607,8 @@ def delete_draft(payload: dict[str, Any]) -> dict[str, Any]:
 def sync_to_csdn(payload: dict[str, Any]) -> dict[str, Any]:
     if not has_playwright():
         raise RuntimeError(
-            "未安装 Playwright。请在 PowerShell 执行："
-            "python -m pip install -r G:\\Obnotes\\tools\\csdn-draft-publisher\\requirements.txt"
-            "；然后执行：python -m playwright install chromium"
+            "未安装 Playwright。请在终端执行："
+            "pip install playwright && python -m playwright install chromium"
         )
 
     from playwright.sync_api import sync_playwright
@@ -607,6 +671,8 @@ def sync_to_csdn(payload: dict[str, Any]) -> dict[str, Any]:
             if not saved:
                 warnings.append("未发现保存按钮或保存成功提示，可能需要在页面手动确认")
 
+            resolved_article_id = extract_article_id(page.url) or article_id
+
             return {
                 "ok": True,
                 "saved": saved,
@@ -614,12 +680,39 @@ def sync_to_csdn(payload: dict[str, Any]) -> dict[str, Any]:
                 "url": page.url,
                 "warnings": warnings,
                 "account_id": account_id,
-                "article_id": article_id,
+                "article_id": resolved_article_id,
                 "updated_existing": bool(article_id),
                 "profile_dir": str(profile_dir),
             }
         finally:
             context.close()
+
+
+def _cleanup_editor_session(account_id: str, session: tuple[Any, Any, Any, str] | None = None) -> None:
+    with EDITOR_SESSIONS_LOCK:
+        current = EDITOR_SESSIONS.get(account_id)
+        if session is not None and current is not session:
+            return
+        removed = EDITOR_SESSIONS.pop(account_id, None)
+    if not removed:
+        return
+    pw_instance, ctx, _, _ = removed
+    try:
+        ctx.close()
+    except Exception:
+        pass
+    try:
+        pw_instance.stop()
+    except Exception:
+        pass
+
+
+def _is_editor_session_alive(session: tuple[Any, Any, Any, str]) -> bool:
+    _, ctx, page, _ = session
+    try:
+        return bool(ctx.pages) and not page.is_closed()
+    except Exception:
+        return False
 
 
 def open_editor(payload: dict[str, Any]) -> dict[str, Any]:
@@ -641,16 +734,18 @@ def open_editor(payload: dict[str, Any]) -> dict[str, Any]:
     with EDITOR_SESSIONS_LOCK:
         existing = EDITOR_SESSIONS.get(account_id)
     if existing:
-        return {
-            "ok": True,
-            "opened": False,
-            "already_open": True,
-            "manual_save_required": True,
-            "account_id": account_id,
-            "article_id": article_id,
-            "url": existing[3],
-            "message": "该账号的 CSDN 编辑器窗口已经打开，请直接继续编辑。",
-        }
+        if _is_editor_session_alive(existing):
+            return {
+                "ok": True,
+                "opened": False,
+                "already_open": True,
+                "manual_save_required": True,
+                "account_id": account_id,
+                "article_id": article_id,
+                "url": existing[3],
+                "message": "该账号的 CSDN 编辑器窗口已经打开，请直接继续编辑。",
+            }
+        _cleanup_editor_session(account_id, existing)
     profile_dir = profile_dir_for_account(account_id)
     profile_dir.mkdir(parents=True, exist_ok=True)
     playwright = sync_playwright().start()
@@ -682,15 +777,25 @@ def open_editor(payload: dict[str, Any]) -> dict[str, Any]:
         if payload.get("cover"):
             warnings.append("封面已读取但暂未自动上传，需在 CSDN 页面确认")
 
+        session_tuple = (playwright, context, page, page.url)
         with EDITOR_SESSIONS_LOCK:
-            EDITOR_SESSIONS[account_id] = (playwright, context, page, page.url)
+            EDITOR_SESSIONS[account_id] = session_tuple
+
+        def _on_close(*_args: Any) -> None:
+            threading.Thread(
+                target=_cleanup_editor_session,
+                args=(account_id, session_tuple),
+                daemon=True,
+            ).start()
+
+        context.on("close", _on_close)
         log(f"editor opened account={account_id!r} article_id={article_id or 'new'} title={title!r} url={page.url}")
         return {
             "ok": True,
             "opened": True,
             "manual_save_required": True,
             "account_id": account_id,
-            "article_id": article_id,
+            "article_id": extract_article_id(page.url) or article_id,
             "url": page.url,
             "warnings": warnings,
             "profile_dir": str(profile_dir),
@@ -734,8 +839,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
         if request_url.path == "/session":
             try:
-                account_id = normalize_account_id(dict(parse_query(request_url.query)).get("account_id"))
-                json_response(self, 200, {"ok": True, **account_state(account_id)})
+                query = dict(parse_query(request_url.query))
+                account_id = normalize_account_id(query.get("account_id"))
+                verify = str(query.get("verify", "")).lower() in ("1", "true", "yes")
+                state = verify_account_session(account_id) if verify else account_state(account_id)
+                json_response(self, 200, {"ok": True, **state})
             except Exception as error:
                 json_response(self, 400, {"ok": False, "error": str(error)})
             return
@@ -747,6 +855,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     "page": query.get("page", "1"),
                     "page_size": query.get("page_size", "20"),
                     "keyword": query.get("keyword", ""),
+                    "headless": query.get("headless", "true"),
                 })
                 json_response(self, 200, result)
             except Exception as error:
