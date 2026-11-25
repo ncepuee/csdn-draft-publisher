@@ -9,6 +9,34 @@ by the Obsidian community directory.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-25
+
+### Added
+
+- Automatic `csdn_article_id` and `csdn_account_id` frontmatter write-back after
+  creating a new draft, preventing duplicate drafts on subsequent syncs.
+- Optional Obsidian Markdown syntax preprocessing before sync (strips `%%...%%`
+  comments, converts `[[wikilinks]]` and `> [!callout]` headers while preserving
+  fenced code blocks).
+- Account rename and delete actions in settings, plus real headless session
+  verification via `/session?verify=1`.
+- Dedicated `styles.css` stylesheet replacing inline `<style>` injection.
+
+### Fixed
+
+- Fixed `open_editor` session leak where manually closing the browser window
+  left the account stuck as "already open" until bridge restart.
+- Updated `ensureBridgeScript` to compare file contents and overwrite outdated
+  `csdn_bridge.py` copies on plugin upgrade.
+- Replaced `window.prompt` and `window.confirm` dialogs with native Obsidian
+  `Modal` dialogs.
+- Improved draft tab detection to match by tab label before falling back to
+  index, and made draft listing/deletion run headless by default.
+- Fixed cross-platform profile directory resolution and removed hardcoded local
+  paths from error messages.
+- Unified ribbon menu labels to Chinese and relaxed `requirements.txt` to
+  `playwright>=1.50.0`.
+
 ## [0.6.1] - 2026-08-31
 
 ### Fixed

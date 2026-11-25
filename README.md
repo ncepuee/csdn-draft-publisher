@@ -3,8 +3,8 @@
 <p align="center">An <a href="https://obsidian.md">Obsidian</a> plugin that syncs the current Markdown note to a <a href="https://www.csdn.net">CSDN</a> blog draft, and lets you manage existing drafts without leaving the vault.</p>
 
 <p align="center">
-  <img alt="ZCode Code Support" src="https://img.shields.io/badge/ZCode-Code_Support-orange">
-  <a href="https://open.bigmodel.cn/"><img alt="GLM-5.3-Flash Agent" src="https://img.shields.io/badge/GLM--5.3--Flash-Agent_used%400.6.1-2563EB"></a>
+  <img alt="Antigravity Code Support" src="https://img.shields.io/badge/Antigravity-Code_Support-4285F4?logo=google&amp;logoColor=white">
+  <a href="https://gemini.google.com/"><img alt="Gemini Agent" src="https://img.shields.io/badge/Gemini-Agent_used%400.7.0-4285F4?logo=googlegemini&amp;logoColor=white"></a>
   <a href="https://github.com/ncepuee/csdn-draft-publisher"><img alt="GitHub stars" src="https://img.shields.io/github/stars/ncepuee/csdn-draft-publisher?logo=github&amp;cacheSeconds=86400"></a>
 </p>
 
@@ -21,8 +21,10 @@
 - Command palette: **Sync current note to CSDN draft**
 - Ribbon icon menu: sync the current note, open the note in the CSDN editor, or open the draft manager
 - Reads `title`, `description` / `summary`, `tags`, and `cover` / `image` from YAML frontmatter
-- Draft manager panel: browse drafts of the active account, search by title, paginate, open a draft in the CSDN editor for write-back editing, and delete drafts with confirmation
-- Multi-account support: each account gets an isolated Playwright browser profile
+- Automatically writes `csdn_article_id` back to frontmatter after creating a draft so re-syncing updates the same draft
+- Optional Obsidian syntax preprocessing (`[[wikilinks]]`, `> [!callout]`, `%%comments%%`) while preserving fenced code blocks
+- Draft manager panel: browse drafts of the active account (headless by default), search by title, paginate, import a draft for write-back editing, and delete drafts with confirmation
+- Multi-account support: add, rename, delete, verify session, and clear login state per account with isolated Playwright profiles
 - Automation only looks for the "save draft" button; it never touches the publish button
 - Local image references are detected and reported; images are not uploaded automatically
 
@@ -44,7 +46,7 @@ The plugin ships a small Python bridge script (`csdn_bridge.py`, also embedded i
 2. Install Python 3.11+ and the bridge dependencies:
 
    ```bash
-   pip install playwright==1.62.0
+   pip install "playwright>=1.50.0"
    python -m playwright install chromium
    ```
 
