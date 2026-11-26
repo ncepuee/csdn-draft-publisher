@@ -9,6 +9,38 @@ by the Obsidian community directory.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-26
+
+### Added
+
+- Built-in QR code login modal (`QrLoginModal`) directly inside Obsidian,
+  supporting both WeChat and CSDN App QR code sign-in without popping up a
+  browser window.
+- Safe re-scan / account-switch prompt when an account already has a valid CSDN
+  session (`already_logged_in`), preserving existing cookies unless the user
+  explicitly chooses to re-scan.
+- QR login endpoints in `csdn_bridge.py` (API `0.7.0`):
+  `POST /login/qr/start`, `GET /login/qr/status`, `POST /login/qr/refresh`,
+  and `POST /login/qr/cancel`, plus automatic Draft Box refresh upon login.
+- Quick QR login entry points in account settings, the Draft Box toolbar, the
+  command palette, and the ribbon menu, plus a one-click "Install browser
+  kernel" button in settings.
+
+### Fixed
+
+- Prioritized full desktop Chrome / Microsoft Edge in headless mode to avoid
+  CSDN gateway `ERR_CONNECTION_CLOSED` drops triggered by
+  `chrome-headless-shell` when authentication cookies are present, and provided
+  automatic browser fallback when Playwright's bundled Chromium is not
+  installed.
+- Parsed CSDN's `/article/list` JSON response directly for reliable draft
+  listing, filtered out hidden `[role="tab"]` elements that caused 180-second
+  timeouts on `mp.csdn.net`, and failed fast when unauthenticated.
+- Validated real CSDN authentication cookies (`UserToken` & `UserName`) instead
+  of relying on unauthenticated editor DOM controls.
+- Fixed `getBridgeScriptPath()` resolving `this.manifest.dir` as a relative
+  path instead of joining it with the vault's `adapter.basePath`.
+
 ## [0.7.0] - 2026-11-25
 
 ### Added

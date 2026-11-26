@@ -4,7 +4,7 @@
 
 <p align="center">
   <img alt="Antigravity Code Support" src="https://img.shields.io/badge/Antigravity-Code_Support-4285F4?logo=google&amp;logoColor=white">
-  <a href="https://gemini.google.com/"><img alt="Gemini Agent" src="https://img.shields.io/badge/Gemini-Agent_used%400.7.0-4285F4?logo=googlegemini&amp;logoColor=white"></a>
+  <a href="https://gemini.google.com/"><img alt="Gemini 4 Carbon Agent" src="https://img.shields.io/badge/Gemini_4_Carbon-Agent_used%400.8.0-4285F4?logo=googlegemini&amp;logoColor=white"></a>
   <a href="https://github.com/ncepuee/csdn-draft-publisher"><img alt="GitHub stars" src="https://img.shields.io/github/stars/ncepuee/csdn-draft-publisher?logo=github&amp;cacheSeconds=86400"></a>
 </p>
 
@@ -25,6 +25,7 @@
 - Optional Obsidian syntax preprocessing (`[[wikilinks]]`, `> [!callout]`, `%%comments%%`) while preserving fenced code blocks
 - Draft manager panel: browse drafts of the active account (headless by default), search by title, paginate, import a draft for write-back editing, and delete drafts with confirmation
 - Multi-account support: add, rename, delete, verify session, and clear login state per account with isolated Playwright profiles
+- In-app QR code login modal (WeChat & CSDN App) without opening a separate browser window, with browser-window login kept as fallback
 - Automation only looks for the "save draft" button; it never touches the publish button
 - Local image references are detected and reported; images are not uploaded automatically
 
