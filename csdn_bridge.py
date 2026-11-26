@@ -35,7 +35,7 @@ def _default_app_data_dir() -> Path:
 
 HOST = "127.0.0.1"
 PORT = 8765
-BRIDGE_API_VERSION = "0.7.0"
+BRIDGE_API_VERSION = "0.8.0"
 EDITOR_URL = "https://editor.csdn.net/md/"
 MANAGE_URL = "https://mp.csdn.net/mp_blog/manage/article"
 LOGIN_URL = "https://passport.csdn.net/login?code=applets"
@@ -112,8 +112,137 @@ def set_account_state(account_id: str | None, status: str, message: str) -> None
         }
 
 
+def normalize_lang(lang: str | None) -> str:
+    value = str(lang or "zh").strip().lower()
+    return "en" if value.startswith("en") else "zh"
+
+
+_EN_EXACT_MESSAGES: dict[str, str] = {
+    "无效的 CSDN 账号标识": "Invalid CSDN account identifier.",
+    "尚未检查登录态": "Session status has not been checked yet.",
+    "未找到可用的 Chromium / Chrome / Edge 浏览器内核。请在插件设置中点击“安装浏览器内核”，或执行：python -m playwright install chromium": (
+        "No Chromium / Chrome / Edge browser binary found. Click 'Install browser kernel' in plugin settings, "
+        "or run: python -m playwright install chromium"
+    ),
+    "CSDN 登录未完成或已超时，请先在助手浏览器中完成登录。": "CSDN sign-in timed out or was not completed. Please finish signing in first.",
+    "未检测到 CSDN 编辑器控件，请确认已登录并使用 Markdown 编辑器。": "CSDN Markdown editor controls were not detected. Please verify your login state.",
+    "当前账号登录态未生效或已过期，请点击“扫码登录”重新登录。": "Session is missing or expired for this account. Click 'QR Login' to sign in.",
+    "CSDN 登录未完成或已超时，请先点击“扫码登录”完成登录。": "CSDN sign-in timed out or was not completed. Click 'QR Login' to sign in.",
+    "未检测到 CSDN 内容管理页面，请确认已登录。": "CSDN article management page was not detected. Please verify your login state.",
+    "CSDN 内容管理页面未加载完整，无法定位草稿箱标签页。": "CSDN management page did not finish loading; could not locate the Drafts tab.",
+    "当前账号尚未登录或登录已过期，请点击“扫码登录”完成登录。": "This account is not signed in or its session has expired. Click 'QR Login' to sign in.",
+    "尚未登录（本地无登录缓存）": "Not signed in (no local browser profile yet)",
+    "未安装 Playwright，无法验证登录态": "Playwright is not installed; unable to verify session",
+    "尚未登录或登录态已失效，请扫码登录": "Not signed in or session expired. Please sign in via QR code",
+    "登录态已失效，请重新扫码登录": "Session expired. Please sign in again via QR code",
+    "登录态有效（CSDN 内容管理后台已连通）": "Session is active (connected to CSDN article console)",
+    "未安装 Playwright，请先安装依赖。": "Playwright is not installed. Please install dependencies first.",
+    "未安装 Playwright。请在终端执行：pip install playwright && python -m playwright install chromium": (
+        "Playwright is not installed. Run: pip install playwright && python -m playwright install chromium"
+    ),
+    "CSDN 草稿搜索请求超时，请稍后重试。": "CSDN draft search timed out. Please try again.",
+    "未找到 CSDN 草稿搜索框。": "Could not locate the CSDN draft search input.",
+    "CSDN 草稿分页请求超时，请稍后重试。": "CSDN draft pagination timed out. Please try again.",
+    "无效的 CSDN 草稿文章 ID": "Invalid CSDN draft article ID.",
+    "CSDN 草稿内容为空或尚未加载完成。": "CSDN draft content is empty or has not finished loading.",
+    "未找到要删除的草稿，可能已被删除或列表已变化。": "Could not find the draft to delete; it may have already been removed.",
+    "未找到 CSDN 草稿删除入口。": "Could not locate the delete action for this CSDN draft.",
+    "CSDN 删除失败": "Failed to delete CSDN draft.",
+    "文章标题为空": "Article title is empty.",
+    "文章正文为空": "Article body is empty.",
+    "未找到摘要输入框": "Summary input box not found on CSDN page",
+    "标签已读取但暂未自动选择，需在 CSDN 页面确认": "Tags read from frontmatter; please confirm tag selection on CSDN",
+    "封面已读取但暂未自动上传，需在 CSDN 页面确认": "Cover read from frontmatter; please confirm cover upload on CSDN",
+    "未发现保存按钮或保存成功提示，可能需要在页面手动确认": "Save confirmation signal not detected; please double-check in the browser",
+    "该账号的 CSDN 编辑器窗口已经打开，请直接继续编辑。": "A CSDN editor window is already open for this account. Please continue editing there.",
+    "登录窗口运行中，请在浏览器中完成 CSDN 登录": "Browser sign-in window is open. Please complete CSDN sign-in there.",
+    "登录态已清除": "Saved session cleared.",
+    "已有同步任务正在运行，请稍后再试": "Another sync task is currently running. Please try again shortly.",
+    "尚未启动扫码登录": "QR login has not been started.",
+    "二维码登录进行中": "QR code login in progress",
+    "正在获取 CSDN 二维码…": "Fetching CSDN QR code…",
+    "未能从 CSDN 登录页提取到二维码，请点击刷新或改用浏览器窗口登录。": (
+        "Could not extract QR code from CSDN login page. Click Refresh or switch to Browser Login."
+    ),
+    "请使用 CSDN APP 扫一扫登录": "Scan with the CSDN App to sign in",
+    "请使用微信扫一扫登录": "Scan with WeChat to sign in",
+    "已取消扫码登录": "QR login cancelled",
+    "扫码登录已超时，请点击刷新重试": "QR login timed out. Click Refresh to try again",
+    "已扫码，请在手机上点击确认登录…": "QR code scanned. Please confirm sign-in on your phone…",
+    "CSDN 要求补充手机号绑定或安全验证，请点击“改用浏览器登录”完成首次验证。": (
+        "CSDN requires phone binding or security verification. Click 'Use Browser Login' to complete it once."
+    ),
+    "二维码已过期，请点击“刷新二维码”": "QR code expired. Click 'Refresh QR' to get a new one",
+    "登录成功，正在同步草稿箱会话…": "Signed in! Syncing draft console session…",
+    "登录成功！已保存该账号登录态": "Signed in! Session saved for this account",
+    "已通过扫码完成 CSDN 登录": "Signed in to CSDN via QR code",
+    "扫码已完成，但未检测到 CSDN 认证 Cookie，请重试或改用浏览器登录。": (
+        "QR scan finished, but CSDN authentication cookies were not detected. Please retry or use Browser Login."
+    ),
+    "正在启动扫码登录…": "Starting QR login…",
+    "正在切换二维码…": "Switching QR mode…",
+    "正在刷新二维码…": "Refreshing QR code…",
+    "登录窗口已关闭。": "Browser sign-in window was closed.",
+    "CSDN 登录未完成或已超时。": "CSDN sign-in timed out or was not completed.",
+}
+
+_EN_REGEX_MESSAGES: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(r"^当前已登录 CSDN 账号：(.+?)。如需切换账号或重新扫码，请点击“重新扫码”。$"),
+        r"Signed in as: \1. Click 'Re-scan / Switch Account' to sign in with another account.",
+    ),
+    (re.compile(r"^已登录（(.+?)）$"), r"Signed in (\1)"),
+    (re.compile(r"^登录态检查失败：([\s\S]+)$"), r"Session check failed: \1"),
+    (
+        re.compile(r"^找不到 CSDN 编辑器控件；已尝试 (\d+) 个选择器。([\s\S]*)$"),
+        r"Could not locate CSDN editor controls after trying \1 selectors. \2",
+    ),
+    (re.compile(r"^CSDN 删除接口返回 HTTP (\d+)$"), r"CSDN delete API returned HTTP \1"),
+]
+
+
+def translate_bridge_text(text: str, lang: str) -> str:
+    if lang != "en" or not text:
+        return text
+    exact = _EN_EXACT_MESSAGES.get(text)
+    if exact is not None:
+        return exact
+    for pattern, repl in _EN_REGEX_MESSAGES:
+        if pattern.match(text):
+            return pattern.sub(repl, text)
+    return text
+
+
+def localize_payload(payload: dict[str, Any], lang: str) -> dict[str, Any]:
+    if lang != "en":
+        return payload
+    out = dict(payload)
+    for key in ("message", "error"):
+        if isinstance(out.get(key), str):
+            out[key] = translate_bridge_text(out[key], lang)
+    if isinstance(out.get("warnings"), list):
+        out["warnings"] = [
+            translate_bridge_text(w, lang) if isinstance(w, str) else w
+            for w in out["warnings"]
+        ]
+    if isinstance(out.get("title"), str) and out["title"] == "【无标题】":
+        out["title"] = "[Untitled]"
+    if isinstance(out.get("items"), list):
+        localized_items = []
+        for item in out["items"]:
+            if isinstance(item, dict) and item.get("title") == "【无标题】":
+                copied = dict(item)
+                copied["title"] = "[Untitled]"
+                localized_items.append(copied)
+            else:
+                localized_items.append(item)
+        out["items"] = localized_items
+    return out
+
+
 def json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    lang = getattr(handler, "_request_lang", "zh")
+    body = json.dumps(localize_payload(payload, lang), ensure_ascii=False).encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Content-Length", str(len(body)))
@@ -1028,12 +1157,15 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         request_url = urlparse(self.path)
+        query_map = dict(parse_query(request_url.query))
+        self._request_lang = normalize_lang(query_map.get("lang"))
         if request_url.path == "/health":
             json_response(self, 200, {
                 "ok": True,
                 "bridge_api_version": BRIDGE_API_VERSION,
                 "account_profiles": True,
                 "qr_login": True,
+                "i18n": True,
                 "playwright": has_playwright(),
                 "profile_dir": str(PROFILE_DIR),
             })
@@ -1103,10 +1235,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         request_url = urlparse(self.path)
+        query_map = dict(parse_query(request_url.query))
+        self._request_lang = normalize_lang(query_map.get("lang"))
         if request_url.path == "/login/qr/start":
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+                if "lang" in payload:
+                    self._request_lang = normalize_lang(payload.get("lang"))
                 result = start_qr_login(
                     payload.get("account_id"),
                     payload.get("mode", "wechat"),
@@ -1121,6 +1257,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+                if "lang" in payload:
+                    self._request_lang = normalize_lang(payload.get("lang"))
                 result = refresh_qr_login(
                     payload.get("account_id"),
                     payload.get("mode"),
@@ -1134,6 +1272,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+                if "lang" in payload:
+                    self._request_lang = normalize_lang(payload.get("lang"))
                 result = cancel_qr_login(payload.get("account_id"))
                 json_response(self, 200, {"ok": True, **result})
             except Exception as error:
@@ -1141,7 +1281,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
         if request_url.path == "/logout":
             try:
-                account_id = normalize_account_id(dict(parse_query(request_url.query)).get("account_id"))
+                account_id = normalize_account_id(query_map.get("account_id"))
                 profile_dir = profile_dir_for_account(account_id)
                 if profile_dir.exists():
                     shutil.rmtree(profile_dir)
@@ -1154,6 +1294,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                if "lang" in payload:
+                    self._request_lang = normalize_lang(payload.get("lang"))
                 result = delete_draft(payload)
                 json_response(self, 200, result)
             except Exception as error:
@@ -1164,6 +1306,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                if "lang" in payload:
+                    self._request_lang = normalize_lang(payload.get("lang"))
                 result = open_editor(payload)
                 json_response(self, 200, result)
             except Exception as error:
@@ -1176,6 +1320,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            if "lang" in payload:
+                self._request_lang = normalize_lang(payload.get("lang"))
             if not SYNC_LOCK.acquire(blocking=False):
                 json_response(self, 409, {"ok": False, "error": "已有同步任务正在运行，请稍后再试"})
                 return
