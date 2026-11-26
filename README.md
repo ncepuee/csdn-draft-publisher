@@ -1,10 +1,12 @@
 <h1 align="center">CSDN Draft Publisher</h1>
 
+<p align="center">English | <a href="README_CN.md">简体中文</a></p>
+
 <p align="center">An <a href="https://obsidian.md">Obsidian</a> plugin that syncs the current Markdown note to a <a href="https://www.csdn.net">CSDN</a> blog draft, and lets you manage existing drafts without leaving the vault.</p>
 
 <p align="center">
   <img alt="Antigravity Code Support" src="https://img.shields.io/badge/Antigravity-Code_Support-4285F4?logo=google&amp;logoColor=white">
-  <a href="https://gemini.google.com/"><img alt="Gemini 4 Carbon Agent" src="https://img.shields.io/badge/Gemini_4_Carbon-Agent_used%400.8.0-4285F4?logo=googlegemini&amp;logoColor=white"></a>
+  <a href="https://gemini.google.com/"><img alt="Gemini 4 Carbon Agent" src="https://img.shields.io/badge/Gemini_4_Carbon-Agent_used%400.9.0-4285F4?logo=googlegemini&amp;logoColor=white"></a>
   <a href="https://github.com/ncepuee/csdn-draft-publisher"><img alt="GitHub stars" src="https://img.shields.io/github/stars/ncepuee/csdn-draft-publisher?logo=github&amp;cacheSeconds=86400"></a>
 </p>
 
@@ -26,6 +28,7 @@
 - Draft manager panel: browse drafts of the active account (headless by default), search by title, paginate, import a draft for write-back editing, and delete drafts with confirmation
 - Multi-account support: add, rename, delete, verify session, and clear login state per account with isolated Playwright profiles
 - In-app QR code login modal (WeChat & CSDN App) without opening a separate browser window, with browser-window login kept as fallback
+- Bilingual UI (`简体中文` / `English`): follows Obsidian's app language by default or switches instantaneously in settings
 - Automation only looks for the "save draft" button; it never touches the publish button
 - Local image references are detected and reported; images are not uploaded automatically
 
@@ -60,6 +63,7 @@ The plugin ships a small Python bridge script (`csdn_bridge.py`, also embedded i
 
 | Setting | Description |
 | --- | --- |
+| Interface language | `Follow app language` (default), `简体中文`, or `English` — updates UI and bridge messages immediately |
 | Bridge URL | Local bridge address, default `http://127.0.0.1:8765` |
 | Enable bridge service | Starts the Python bridge with the configured interpreter; disabling only stops a bridge the plugin itself started |
 | Python command | Python interpreter used to launch the bridge |

@@ -9,6 +9,25 @@ by the Obsidian community directory.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-26
+
+### Added
+
+- Full bilingual UI (`简体中文` / `English`) with an **Interface language**
+  selector in settings (`Follow app language` / `简体中文` / `English`) that
+  updates settings, Draft Box, modals, commands, ribbon menus, and notices
+  immediately without reloading.
+- Bilingual HTTP response localization (`lang=zh|en`) in `csdn_bridge.py`
+  (API `0.8.0`), translating status, warning, and error messages while keeping
+  CSDN DOM selectors intact.
+- Companion Simplified Chinese documentation (`README_CN.md`) with top-level
+  language switcher links in both `README.md` and `README_CN.md`.
+
+### Changed
+
+- Removed manual `<h2>` plugin-title heading from the settings tab to comply
+  with Obsidian community plugin review guidelines.
+
 ## [0.8.0] - 2026-11-26
 
 ### Added
