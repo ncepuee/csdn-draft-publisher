@@ -8,6 +8,7 @@ as fallbacks and failures are reported instead of silently publishing.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import re
@@ -19,7 +20,7 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 
 def _default_app_data_dir() -> Path:
@@ -34,9 +35,15 @@ def _default_app_data_dir() -> Path:
 
 HOST = "127.0.0.1"
 PORT = 8765
-BRIDGE_API_VERSION = "0.6.0"
+BRIDGE_API_VERSION = "0.7.0"
 EDITOR_URL = "https://editor.csdn.net/md/"
 MANAGE_URL = "https://mp.csdn.net/mp_blog/manage/article"
+LOGIN_URL = "https://passport.csdn.net/login?code=applets"
+CHROME_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/134.0.0.0 Safari/537.36"
+)
 APP_DATA_DIR = _default_app_data_dir()
 PROFILE_DIR = APP_DATA_DIR / "playwright-profile"
 PROFILE_ROOT = APP_DATA_DIR / "profiles"
@@ -46,6 +53,8 @@ ACCOUNT_STATE_LOCK = threading.Lock()
 ACCOUNT_STATES: dict[str, dict[str, Any]] = {}
 EDITOR_SESSIONS_LOCK = threading.Lock()
 EDITOR_SESSIONS: dict[str, tuple[Any, Any, Any, str]] = {}
+QR_SESSIONS_LOCK = threading.Lock()
+QR_SESSIONS: dict[str, dict[str, Any]] = {}
 
 
 def log(message: str) -> None:
@@ -120,6 +129,64 @@ def has_playwright() -> bool:
         return True
     except ImportError:
         return False
+
+
+def launch_browser_context(
+    playwright: Any,
+    user_data_dir: str | Path,
+    *,
+    headless: bool = False,
+    viewport: dict[str, int] | None = None,
+    permissions: list[str] | None = None,
+) -> Any:
+    """Launch a persistent Chromium context with automatic fallback to Chrome/Edge when Playwright's browser binaries are not installed."""
+    base_kwargs: dict[str, Any] = {
+        "user_data_dir": str(user_data_dir),
+        "headless": headless,
+        "viewport": viewport or {"width": 1440, "height": 1000},
+    }
+    if permissions:
+        base_kwargs["permissions"] = permissions
+    if headless:
+        base_kwargs["user_agent"] = CHROME_USER_AGENT
+
+    attempts: list[dict[str, Any]] = []
+    if headless:
+        # Prefer full Chrome / Edge in headless mode: CSDN's gateway drops
+        # Playwright's stripped-down chrome-headless-shell with ERR_CONNECTION_CLOSED
+        # once authentication cookies are present.
+        attempts.append({"channel": "chrome"})
+        attempts.append({"channel": "msedge"})
+        try:
+            full_exe = playwright.chromium.executable_path
+            if full_exe and Path(full_exe).exists():
+                attempts.append({"executable_path": full_exe, "args": ["--headless=new"]})
+        except Exception:
+            pass
+        attempts.append({})
+    else:
+        attempts.append({})
+        attempts.append({"channel": "chrome"})
+        attempts.append({"channel": "msedge"})
+
+    first_error: Exception | None = None
+    for extra in attempts:
+        try:
+            return playwright.chromium.launch_persistent_context(**base_kwargs, **extra)
+        except Exception as error:
+            if first_error is None:
+                first_error = error
+            msg = str(error)
+            if (
+                "Executable doesn't exist" not in msg
+                and "is not found" not in msg
+                and "Chromium distribution" not in msg
+            ):
+                raise
+    raise RuntimeError(
+        "未找到可用的 Chromium / Chrome / Edge 浏览器内核。"
+        "请在插件设置中点击“安装浏览器内核”，或执行：python -m playwright install chromium"
+    ) from first_error
 
 
 def selector_candidates(page: Any, candidates: list[str], timeout: int = 15000) -> Any:
@@ -312,48 +379,108 @@ def wait_for_login_if_needed(page: Any) -> None:
         raise RuntimeError("未检测到 CSDN 编辑器控件，请确认已登录并使用 Markdown 编辑器。") from error
 
 
-def wait_for_manage_page(page: Any) -> None:
+def auth_cookie_username(context: Any) -> str:
     try:
-        page.wait_for_selector('[role="tab"]', state="visible", timeout=180000)
-    except Exception as error:
-        if "passport.csdn.net" in page.url or "login" in page.url.lower():
-            raise RuntimeError("CSDN 登录未完成或已超时，请先在助手浏览器中完成登录。") from error
-        raise RuntimeError("未检测到 CSDN 内容管理页面，请确认已登录。") from error
+        cookies = context.cookies([
+            "https://www.csdn.net",
+            "https://mp.csdn.net",
+            "https://editor.csdn.net",
+            "https://passport.csdn.net",
+        ])
+    except Exception:
+        return ""
+    names = {c.get("name"): str(c.get("value") or "").strip() for c in cookies}
+    if not (names.get("UserToken") and names.get("UserName")):
+        return ""
+    raw = names.get("UserNick") or names.get("UserName") or ""
+    try:
+        return unquote(raw)
+    except Exception:
+        return raw
+
+
+def has_auth_cookies(context: Any) -> bool:
+    """Return True only when CSDN's real authentication cookies (UserToken & UserName) exist."""
+    return bool(auth_cookie_username(context))
+
+
+def _visible_manage_tabs(page: Any) -> list[Any]:
+    result: list[Any] = []
+    for selector in ('[role="tab"]', ".nav-link", ".el-tabs__item"):
+        loc = page.locator(selector)
+        try:
+            cnt = loc.count()
+        except Exception:
+            continue
+        for idx in range(cnt):
+            item = loc.nth(idx)
+            try:
+                if item.is_visible():
+                    result.append(item)
+            except Exception:
+                continue
+        if result:
+            return result
+    return result
+
+
+def wait_for_manage_page(page: Any, *, headless: bool = False) -> None:
+    timeout_sec = 25.0 if headless else 180.0
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        current_url = (page.url or "").lower()
+        if headless and ("passport.csdn.net" in current_url or "/login" in current_url):
+            raise RuntimeError("当前账号登录态未生效或已过期，请点击“扫码登录”重新登录。")
+        if _visible_manage_tabs(page):
+            return
+        page.wait_for_timeout(400)
+    if "passport.csdn.net" in (page.url or "").lower() or "login" in (page.url or "").lower():
+        raise RuntimeError("CSDN 登录未完成或已超时，请先点击“扫码登录”完成登录。")
+    raise RuntimeError("未检测到 CSDN 内容管理页面，请确认已登录。")
 
 
 def wait_for_article_results(page: Any) -> None:
-    try:
-        page.locator(
-            ".article-list-item-mp, .el_mcm-pagination, .no-data-box",
-        ).first.wait_for(state="visible", timeout=60000)
-    except Exception as error:
-        raise RuntimeError("CSDN 内容管理列表加载超时，请稍后重试。") from error
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        for selector in (".article-list-item-mp", ".el_mcm-pagination", ".no-data-box", ".empty-box"):
+            loc = page.locator(selector)
+            try:
+                for idx in range(min(loc.count(), 5)):
+                    if loc.nth(idx).is_visible():
+                        return
+            except Exception:
+                continue
+        page.wait_for_timeout(300)
 
 
 def article_list_response(response: Any, status: str = "draft") -> bool:
     return (
         "/blog/phoenix/console/v1/article/list" in response.url
-        and f"status={status}" in response.url
+        and (f"status={status}" in response.url or status == "")
         and response.request.method == "GET"
     )
 
 
 def extract_article_id(url: str) -> str | None:
-    match = re.search(r"[?&]articleId=(\d+)", url or "")
-    return match.group(1) if match else None
+    for pattern in (r"[?&]articleId=(\d+)", r"/editor/(\d+)", r"/details/(\d+)"):
+        match = re.search(pattern, url or "")
+        if match:
+            return match.group(1)
+    return None
 
 
 def find_drafts_tab(page: Any) -> Any:
-    named_tab = page.get_by_role("tab", name=re.compile(r"草稿")).first
-    try:
-        if named_tab.count():
-            return named_tab
-    except Exception:
-        pass
-    tabs = page.get_by_role("tab")
-    if tabs.count() < 5:
-        raise RuntimeError("CSDN 内容管理页面未加载完整，无法定位草稿箱。")
-    return tabs.nth(4)
+    for item in _visible_manage_tabs(page):
+        try:
+            text = (item.inner_text() or "").strip()
+            if "草稿" in text:
+                return item
+        except Exception:
+            continue
+    visible_tabs = _visible_manage_tabs(page)
+    if len(visible_tabs) >= 5:
+        return visible_tabs[4]
+    raise RuntimeError("CSDN 内容管理页面未加载完整，无法定位草稿箱标签页。")
 
 
 def manage_page_for_account(
@@ -363,16 +490,19 @@ def manage_page_for_account(
 ) -> tuple[Any, Any]:
     profile_dir = profile_dir_for_account(account_id)
     profile_dir.mkdir(parents=True, exist_ok=True)
-    context = playwright.chromium.launch_persistent_context(
-        user_data_dir=str(profile_dir),
+    context = launch_browser_context(
+        playwright,
+        profile_dir,
         headless=headless,
         viewport={"width": 1440, "height": 1000},
         permissions=["clipboard-read", "clipboard-write"],
     )
     try:
+        if headless and not has_auth_cookies(context):
+            raise RuntimeError("当前账号尚未登录或登录已过期，请点击“扫码登录”完成登录。")
         page = context.pages[0] if context.pages else context.new_page()
         page.goto(MANAGE_URL, wait_until="domcontentloaded", timeout=60000)
-        wait_for_manage_page(page)
+        wait_for_manage_page(page, headless=headless)
         return context, page
     except Exception:
         context.close()
@@ -394,28 +524,64 @@ def verify_account_session(account_id: str) -> dict[str, Any]:
 
     try:
         with sync_playwright() as playwright:
-            context = playwright.chromium.launch_persistent_context(
-                user_data_dir=str(profile_dir),
+            context = launch_browser_context(
+                playwright,
+                profile_dir,
                 headless=True,
                 viewport={"width": 1440, "height": 1000},
             )
             try:
+                if not has_auth_cookies(context):
+                    set_account_state(normalized, "logged_out", "尚未登录或登录态已失效，请扫码登录")
+                    return account_state(normalized)
                 page = context.pages[0] if context.pages else context.new_page()
-                page.goto(EDITOR_URL, wait_until="domcontentloaded", timeout=25000)
-                page.wait_for_timeout(2500)
-                if "passport.csdn.net" in page.url or "login" in page.url.lower():
-                    set_account_state(normalized, "logged_out", "登录态已失效，请重新登录")
-                elif page.locator(
-                    '.article-bar__title-display, input.article-bar__title, .editor__inner[contenteditable="true"]'
-                ).count() > 0:
-                    set_account_state(normalized, "logged_in", "登录态有效（已检测到 CSDN 编辑器）")
+                page.goto(MANAGE_URL, wait_until="domcontentloaded", timeout=25000)
+                page.wait_for_timeout(2000)
+                if "passport.csdn.net" in (page.url or "").lower() or "/login" in (page.url or "").lower():
+                    set_account_state(normalized, "logged_out", "登录态已失效，请重新扫码登录")
                 else:
-                    set_account_state(normalized, "logged_out", "未检测到 CSDN 编辑器，可能需要重新登录")
+                    set_account_state(normalized, "logged_in", "登录态有效（CSDN 内容管理后台已连通）")
             finally:
                 context.close()
     except Exception as error:
         set_account_state(normalized, "error", f"登录态检查失败：{error}")
     return account_state(normalized)
+
+
+def _parse_drafts_from_api_body(api_body: dict[str, Any] | None) -> tuple[list[dict[str, Any]] | None, int | None]:
+    if not isinstance(api_body, dict) or api_body.get("code") != 200:
+        return None, None
+    data = api_body.get("data")
+    if not isinstance(data, dict):
+        return None, None
+    raw_list = data.get("list")
+    if not isinstance(raw_list, list):
+        return None, None
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in raw_list:
+        if not isinstance(entry, dict):
+            continue
+        article_id = str(entry.get("articleId") or entry.get("id") or "").strip()
+        if not article_id or article_id in seen:
+            continue
+        seen.add(article_id)
+        title = str(entry.get("title") or "").strip() or "【无标题】"
+        updated_at = str(
+            entry.get("postTime")
+            or entry.get("updateTime")
+            or entry.get("formatTime")
+            or ""
+        ).strip()
+        items.append({
+            "article_id": article_id,
+            "title": title,
+            "edit_url": f"https://editor.csdn.net/md/?articleId={article_id}",
+            "updated_at": updated_at,
+        })
+    total_raw = data.get("total")
+    total = int(total_raw) if isinstance(total_raw, (int, float)) or (isinstance(total_raw, str) and total_raw.isdigit()) else len(items)
+    return items, total
 
 
 def read_drafts(payload: dict[str, Any]) -> dict[str, Any]:
@@ -432,26 +598,46 @@ def read_drafts(payload: dict[str, Any]) -> dict[str, Any]:
     with sync_playwright() as playwright:
         context, page = manage_page_for_account(playwright, account_id, headless=headless)
         try:
+            last_api_body: dict[str, Any] | None = None
+
+            def capture_list_response(resp: Any) -> None:
+                nonlocal last_api_body
+                if "/blog/phoenix/console/v1/article/list" in resp.url and resp.request.method == "GET":
+                    try:
+                        last_api_body = resp.json()
+                    except Exception:
+                        pass
+
+            page.on("response", capture_list_response)
             drafts_tab = find_drafts_tab(page)
             try:
                 with page.expect_response(
                     lambda response: article_list_response(response),
-                    timeout=60000,
-                ):
+                    timeout=30000,
+                ) as resp_info:
                     drafts_tab.click()
-            except Exception as error:
-                raise RuntimeError("CSDN 草稿箱接口响应超时，请确认登录态仍然有效。") from error
+                try:
+                    last_api_body = resp_info.value.json()
+                except Exception:
+                    pass
+            except Exception:
+                # Tab may already be active or use a slightly different query param; give XHR a moment.
+                page.wait_for_timeout(2000)
             wait_for_article_results(page)
 
-            search = page.locator('input[placeholder="请输入标题关键词"]').first
+            search = page.locator('input[placeholder*="标题关键词"], input[placeholder*="关键词"]').first
             if keyword and search.count():
                 search.fill(keyword)
                 try:
                     with page.expect_response(
-                        lambda response: article_list_response(response),
-                        timeout=60000,
-                    ):
+                        lambda response: article_list_response(response, status=""),
+                        timeout=30000,
+                    ) as resp_info:
                         page.get_by_role("button", name="搜索").click()
+                    try:
+                        last_api_body = resp_info.value.json()
+                    except Exception:
+                        pass
                 except Exception as error:
                     raise RuntimeError("CSDN 草稿搜索请求超时，请稍后重试。") from error
                 wait_for_article_results(page)
@@ -465,42 +651,53 @@ def read_drafts(payload: dict[str, Any]) -> dict[str, Any]:
                         break
                     try:
                         with page.expect_response(
-                            lambda response: article_list_response(response),
-                            timeout=60000,
-                        ):
+                            lambda response: article_list_response(response, status=""),
+                            timeout=30000,
+                        ) as resp_info:
                             next_button.click()
+                        try:
+                            last_api_body = resp_info.value.json()
+                        except Exception:
+                            pass
                     except Exception as error:
                         raise RuntimeError("CSDN 草稿分页请求超时，请稍后重试。") from error
                     wait_for_article_results(page)
 
-            links = page.locator('a[href*="editor.csdn.net/md/?articleId="]')
-            items: list[dict[str, Any]] = []
-            seen: set[str] = set()
-            for index in range(links.count()):
-                link = links.nth(index)
-                href = link.get_attribute("href") or ""
-                article_id = extract_article_id(href)
-                title = (link.inner_text() or "").strip()
-                if not article_id or article_id in seen or not title:
-                    continue
-                seen.add(article_id)
-                item = link.locator("xpath=ancestor::div[contains(@class, 'article-list-item-mp')][1]").first
-                item_text = item.inner_text() if item.count() else ""
-                time_match = re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", item_text)
-                items.append({
-                    "article_id": article_id,
-                    "title": title,
-                    "edit_url": f"https://editor.csdn.net/md/?articleId={article_id}",
-                    "updated_at": time_match.group(0) if time_match else "",
-                })
-            if not items and page.locator(".el_mcm-pagination").count() == 0:
-                raise RuntimeError("CSDN 草稿列表加载失败，请稍后重试。")
-            draft_count = None
-            try:
-                draft_count_match = re.search(r"\((\d+)\)", drafts_tab.inner_text())
-                draft_count = int(draft_count_match.group(1)) if draft_count_match else None
-            except Exception:
-                pass
+            api_items, api_total = _parse_drafts_from_api_body(last_api_body)
+            if api_items is not None:
+                items = api_items
+                draft_count = api_total
+            else:
+                links = page.locator(
+                    'a[href*="articleId="], a[href*="/creation/editor/"], .article-list-item-mp a'
+                )
+                items = []
+                seen: set[str] = set()
+                for index in range(links.count()):
+                    link = links.nth(index)
+                    href = link.get_attribute("href") or ""
+                    article_id = extract_article_id(href)
+                    title = (link.inner_text() or "").strip()
+                    if not article_id or article_id in seen or not title or title in ("编辑", "删除", "浏览"):
+                        continue
+                    seen.add(article_id)
+                    item = link.locator("xpath=ancestor::div[contains(@class, 'article-list-item-mp')][1]").first
+                    item_text = item.inner_text() if item.count() else ""
+                    time_match = re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", item_text)
+                    items.append({
+                        "article_id": article_id,
+                        "title": title,
+                        "edit_url": f"https://editor.csdn.net/md/?articleId={article_id}",
+                        "updated_at": time_match.group(0) if time_match else "",
+                    })
+                draft_count = None
+
+            if draft_count is None:
+                try:
+                    draft_count_match = re.search(r"\((\d+)\)", drafts_tab.inner_text())
+                    draft_count = int(draft_count_match.group(1)) if draft_count_match else len(items)
+                except Exception:
+                    draft_count = len(items)
             return {
                 "ok": True,
                 "account_id": account_id,
@@ -528,8 +725,9 @@ def read_draft(payload: dict[str, Any]) -> dict[str, Any]:
     profile_dir = profile_dir_for_account(account_id)
     profile_dir.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as playwright:
-        context = playwright.chromium.launch_persistent_context(
-            user_data_dir=str(profile_dir),
+        context = launch_browser_context(
+            playwright,
+            profile_dir,
             headless=True,
             viewport={"width": 1440, "height": 1000},
             permissions=["clipboard-read", "clipboard-write"],
@@ -630,8 +828,9 @@ def sync_to_csdn(payload: dict[str, Any]) -> dict[str, Any]:
     warnings: list[str] = []
 
     with sync_playwright() as playwright:
-        context = playwright.chromium.launch_persistent_context(
-            user_data_dir=str(profile_dir),
+        context = launch_browser_context(
+            playwright,
+            profile_dir,
             headless=not bool(payload.get("open_browser", True)),
             viewport={"width": 1440, "height": 1000},
             permissions=["clipboard-read", "clipboard-write"],
@@ -751,8 +950,9 @@ def open_editor(payload: dict[str, Any]) -> dict[str, Any]:
     playwright = sync_playwright().start()
     context = None
     try:
-        context = playwright.chromium.launch_persistent_context(
-            user_data_dir=str(profile_dir),
+        context = launch_browser_context(
+            playwright,
+            profile_dir,
             headless=False,
             viewport={"width": 1440, "height": 1000},
             permissions=["clipboard-read", "clipboard-write"],
@@ -833,9 +1033,18 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "ok": True,
                 "bridge_api_version": BRIDGE_API_VERSION,
                 "account_profiles": True,
+                "qr_login": True,
                 "playwright": has_playwright(),
                 "profile_dir": str(PROFILE_DIR),
             })
+            return
+        if request_url.path == "/login/qr/status":
+            try:
+                query = dict(parse_query(request_url.query))
+                account_id = normalize_account_id(query.get("account_id"))
+                json_response(self, 200, {"ok": True, **qr_session_snapshot(account_id)})
+            except Exception as error:
+                json_response(self, 400, {"ok": False, "error": str(error)})
             return
         if request_url.path == "/session":
             try:
@@ -894,6 +1103,42 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         request_url = urlparse(self.path)
+        if request_url.path == "/login/qr/start":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+                result = start_qr_login(
+                    payload.get("account_id"),
+                    payload.get("mode", "wechat"),
+                    force_relogin=bool(payload.get("force_relogin", False)),
+                )
+                json_response(self, 200, {"ok": True, **result})
+            except Exception as error:
+                log(f"qr start error: {error}\n{traceback.format_exc()}")
+                json_response(self, 500, {"ok": False, "error": str(error)})
+            return
+        if request_url.path == "/login/qr/refresh":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+                result = refresh_qr_login(
+                    payload.get("account_id"),
+                    payload.get("mode"),
+                )
+                json_response(self, 200, {"ok": True, **result})
+            except Exception as error:
+                log(f"qr refresh error: {error}\n{traceback.format_exc()}")
+                json_response(self, 500, {"ok": False, "error": str(error)})
+            return
+        if request_url.path == "/login/qr/cancel":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+                result = cancel_qr_login(payload.get("account_id"))
+                json_response(self, 200, {"ok": True, **result})
+            except Exception as error:
+                json_response(self, 400, {"ok": False, "error": str(error)})
+            return
         if request_url.path == "/logout":
             try:
                 account_id = normalize_account_id(dict(parse_query(request_url.query)).get("account_id"))
@@ -949,6 +1194,338 @@ def parse_query(query: str) -> list[tuple[str, str]]:
     return parse_qsl(query, keep_blank_values=True)
 
 
+def normalize_qr_mode(mode: str | None) -> str:
+    value = str(mode or "wechat").strip().lower()
+    return "app" if value == "app" else "wechat"
+
+
+def qr_session_snapshot(account_id: str | None) -> dict[str, Any]:
+    normalized = normalize_account_id(account_id)
+    with QR_SESSIONS_LOCK:
+        entry = QR_SESSIONS.get(normalized)
+        if not entry:
+            return {
+                "account_id": normalized,
+                "mode": "wechat",
+                "status": "idle",
+                "qr_data_url": "",
+                "message": "尚未启动扫码登录",
+                "updated_at": None,
+            }
+        return dict(entry["state"])
+
+
+def _update_qr_state(
+    entry: dict[str, Any],
+    *,
+    status: str | None = None,
+    mode: str | None = None,
+    qr_data_url: str | None = None,
+    message: str | None = None,
+) -> None:
+    with QR_SESSIONS_LOCK:
+        state = entry["state"]
+        if status is not None:
+            state["status"] = status
+        if mode is not None:
+            state["mode"] = mode
+        if qr_data_url is not None:
+            state["qr_data_url"] = qr_data_url
+        if message is not None:
+            state["message"] = message
+        state["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _extract_qr_data_url(page: Any, mode: str) -> str:
+    selectors = (
+        [".app-code-wrap img", 'img[src^="data:image/png;base64,"]']
+        if mode == "app"
+        else [".public-code img", 'img[src^="data:image/jpeg;base64,"]']
+    )
+    selectors.append('img[src^="data:image/"]')
+
+    for selector in selectors:
+        locator = page.locator(selector)
+        try:
+            count = locator.count()
+        except Exception:
+            continue
+        for idx in range(count):
+            img = locator.nth(idx)
+            try:
+                if not img.is_visible():
+                    continue
+                box = img.bounding_box()
+                if not box or box["width"] < 100 or box["height"] < 100:
+                    continue
+                src = (img.get_attribute("src") or "").strip()
+                if src.startswith("data:image/") and len(src) > 256:
+                    return src
+                png_bytes = img.screenshot(type="png")
+                if png_bytes:
+                    return "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+            except Exception:
+                continue
+    return ""
+
+
+def _switch_qr_tab(page: Any, mode: str) -> None:
+    tab_text = "APP登录" if mode == "app" else "微信登录"
+    tab = page.get_by_text(tab_text, exact=True).first
+    try:
+        if tab.count() and tab.is_visible():
+            tab.click()
+            page.wait_for_timeout(1200)
+    except Exception:
+        pass
+
+
+def _is_logged_in_url(url: str) -> bool:
+    lower = (url or "").lower()
+    if not lower or lower.startswith("chrome-error://") or lower.startswith("about:"):
+        return False
+    if "passport.csdn.net" in lower or "/login" in lower:
+        return False
+    return "csdn.net" in lower
+
+
+def _has_editor_controls(page: Any) -> bool:
+    try:
+        return page.locator(
+            '.article-bar__title-display, input.article-bar__title, .editor__inner[contenteditable="true"]'
+        ).count() > 0
+    except Exception:
+        return False
+
+
+def _qr_login_worker(account_id: str, entry: dict[str, Any]) -> None:
+    from playwright.sync_api import sync_playwright
+
+    cancel_event: threading.Event = entry["cancel_event"]
+    refresh_event: threading.Event = entry["refresh_event"]
+    profile_dir = profile_dir_for_account(account_id)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    set_account_state(account_id, "logging_in", "二维码登录进行中")
+
+    try:
+        with sync_playwright() as playwright:
+            context = launch_browser_context(
+                playwright,
+                profile_dir,
+                headless=True,
+                viewport={"width": 1280, "height": 900},
+                permissions=["clipboard-read", "clipboard-write"],
+            )
+            try:
+                if entry.get("force_relogin"):
+                    context.clear_cookies()
+                    entry["force_relogin"] = False
+                else:
+                    existing_user = auth_cookie_username(context)
+                    if existing_user:
+                        _update_qr_state(
+                            entry,
+                            status="already_logged_in",
+                            qr_data_url="",
+                            message=f"当前已登录 CSDN 账号：{existing_user}。如需切换账号或重新扫码，请点击“重新扫码”。",
+                        )
+                        set_account_state(account_id, "logged_in", f"已登录（{existing_user}）")
+                        return
+
+                page = context.pages[0] if context.pages else context.new_page()
+
+                def load_qr(mode: str, force_reload: bool = False) -> bool:
+                    _update_qr_state(
+                        entry,
+                        status="loading",
+                        mode=mode,
+                        qr_data_url="",
+                        message="正在获取 CSDN 二维码…",
+                    )
+                    if entry.get("force_relogin"):
+                        context.clear_cookies()
+                        entry["force_relogin"] = False
+                        force_reload = True
+                    if force_reload or "passport.csdn.net" not in (page.url or "").lower():
+                        page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
+                        page.wait_for_timeout(2000)
+
+                    if has_auth_cookies(context) and _is_logged_in_url(page.url):
+                        return True
+
+                    _switch_qr_tab(page, mode)
+                    qr_url = ""
+                    for _ in range(15):
+                        if cancel_event.is_set():
+                            return False
+                        if has_auth_cookies(context) and _is_logged_in_url(page.url):
+                            return True
+                        qr_url = _extract_qr_data_url(page, mode)
+                        if qr_url:
+                            break
+                        page.wait_for_timeout(500)
+
+                    if not qr_url:
+                        raise RuntimeError("未能从 CSDN 登录页提取到二维码，请点击刷新或改用浏览器窗口登录。")
+
+                    tip = "请使用 CSDN APP 扫一扫登录" if mode == "app" else "请使用微信扫一扫登录"
+                    _update_qr_state(entry, status="ready", mode=mode, qr_data_url=qr_url, message=tip)
+                    return False
+
+                already_logged_in = load_qr(entry["desired_mode"], force_reload=True)
+                deadline = time.monotonic() + 180.0
+
+                while not already_logged_in:
+                    if cancel_event.is_set():
+                        _update_qr_state(entry, status="cancelled", message="已取消扫码登录")
+                        set_account_state(account_id, "unknown", "已取消扫码登录")
+                        return
+
+                    if time.monotonic() >= deadline:
+                        _update_qr_state(entry, status="expired", message="扫码登录已超时，请点击刷新重试")
+                        return
+
+                    if refresh_event.is_set():
+                        refresh_event.clear()
+                        target_mode = entry["desired_mode"]
+                        force_reload = bool(entry.get("force_reload", False))
+                        entry["force_reload"] = False
+                        already_logged_in = load_qr(target_mode, force_reload=force_reload)
+                        deadline = time.monotonic() + 180.0
+                        continue
+
+                    if has_auth_cookies(context):
+                        already_logged_in = True
+                        break
+
+                    try:
+                        body_text = page.locator("body").inner_text(timeout=1500)
+                    except Exception:
+                        body_text = ""
+
+                    if re.search(r"扫码成功|请在手机|确认登录", body_text):
+                        _update_qr_state(entry, status="scanned", message="已扫码，请在手机上点击确认登录…")
+                    elif re.search(r"绑定手机|安全验证|滑块", body_text):
+                        _update_qr_state(
+                            entry,
+                            status="error",
+                            message="CSDN 要求补充手机号绑定或安全验证，请点击“改用浏览器登录”完成首次验证。",
+                        )
+                        return
+                    elif re.search(r"二维码已失效|二维码已过期|已过期", body_text):
+                        _update_qr_state(entry, status="expired", message="二维码已过期，请点击“刷新二维码”")
+                    else:
+                        latest_qr = _extract_qr_data_url(page, entry["desired_mode"])
+                        if latest_qr and latest_qr != entry["state"].get("qr_data_url"):
+                            tip = (
+                                "请使用 CSDN APP 扫一扫登录"
+                                if entry["desired_mode"] == "app"
+                                else "请使用微信扫一扫登录"
+                            )
+                            _update_qr_state(entry, status="ready", qr_data_url=latest_qr, message=tip)
+
+                    page.wait_for_timeout(800)
+
+                # Wait for SSO redirect and cookie persistence on mp.csdn.net
+                _update_qr_state(entry, status="scanned", message="登录成功，正在同步草稿箱会话…")
+                page.wait_for_timeout(1500)
+                if "mp.csdn.net" not in (page.url or "").lower():
+                    page.goto(MANAGE_URL, wait_until="domcontentloaded", timeout=30000)
+                wait_for_manage_page(page, headless=True)
+                page.wait_for_timeout(1200)
+                if has_auth_cookies(context):
+                    _update_qr_state(entry, status="logged_in", message="登录成功！已保存该账号登录态")
+                    set_account_state(account_id, "logged_in", "已通过扫码完成 CSDN 登录")
+                    log(f"qr login complete account={account_id!r} mode={entry['desired_mode']!r}")
+                else:
+                    raise RuntimeError("扫码已完成，但未检测到 CSDN 认证 Cookie，请重试或改用浏览器登录。")
+            finally:
+                context.close()
+    except Exception as error:
+        if not cancel_event.is_set():
+            _update_qr_state(entry, status="error", message=str(error))
+            set_account_state(account_id, "error", str(error))
+            log(f"qr login error account={account_id!r}: {error}\n{traceback.format_exc()}")
+
+
+def cancel_qr_login(account_id: str | None) -> dict[str, Any]:
+    normalized = normalize_account_id(account_id)
+    with QR_SESSIONS_LOCK:
+        entry = QR_SESSIONS.get(normalized)
+        if entry:
+            entry["cancel_event"].set()
+            entry["state"]["status"] = "cancelled"
+            entry["state"]["message"] = "已取消扫码登录"
+            entry["state"]["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    return qr_session_snapshot(normalized)
+
+
+def start_qr_login(
+    account_id: str | None,
+    mode: str | None = "wechat",
+    *,
+    force_relogin: bool = False,
+) -> dict[str, Any]:
+    if not has_playwright():
+        raise RuntimeError("未安装 Playwright，请先安装依赖。")
+    normalized = normalize_account_id(account_id)
+    qr_mode = normalize_qr_mode(mode)
+
+    old_thread = None
+    with QR_SESSIONS_LOCK:
+        old_entry = QR_SESSIONS.get(normalized)
+        if old_entry:
+            old_entry["cancel_event"].set()
+            old_thread = old_entry.get("thread")
+
+    if old_thread and old_thread.is_alive():
+        old_thread.join(timeout=3.0)
+
+    entry: dict[str, Any] = {
+        "cancel_event": threading.Event(),
+        "refresh_event": threading.Event(),
+        "desired_mode": qr_mode,
+        "force_reload": True,
+        "force_relogin": force_relogin,
+        "state": {
+            "account_id": normalized,
+            "mode": qr_mode,
+            "status": "loading",
+            "qr_data_url": "",
+            "message": "正在启动扫码登录…",
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        },
+        "thread": None,
+    }
+    thread = threading.Thread(target=_qr_login_worker, args=(normalized, entry), daemon=True)
+    entry["thread"] = thread
+    with QR_SESSIONS_LOCK:
+        QR_SESSIONS[normalized] = entry
+    thread.start()
+    return qr_session_snapshot(normalized)
+
+
+def refresh_qr_login(account_id: str | None, mode: str | None = None) -> dict[str, Any]:
+    normalized = normalize_account_id(account_id)
+    with QR_SESSIONS_LOCK:
+        entry = QR_SESSIONS.get(normalized)
+        thread = entry.get("thread") if entry else None
+        is_running = bool(entry and thread and thread.is_alive() and not entry["cancel_event"].is_set())
+        if is_running:
+            next_mode = normalize_qr_mode(mode or entry["desired_mode"])
+            mode_changed = next_mode != entry["desired_mode"]
+            entry["desired_mode"] = next_mode
+            entry["force_reload"] = not mode_changed
+            entry["state"]["mode"] = next_mode
+            entry["state"]["status"] = "loading"
+            entry["state"]["qr_data_url"] = ""
+            entry["state"]["message"] = "正在切换二维码…" if mode_changed else "正在刷新二维码…"
+            entry["state"]["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            entry["refresh_event"].set()
+            return dict(entry["state"])
+    return start_qr_login(normalized, mode or "wechat", force_relogin=True)
+
+
 def login_to_csdn(account_id: str) -> None:
     """Open an account-specific persistent browser and wait for user login."""
     try:
@@ -959,17 +1536,30 @@ def login_to_csdn(account_id: str) -> None:
         profile_dir = profile_dir_for_account(account_id)
         profile_dir.mkdir(parents=True, exist_ok=True)
         with sync_playwright() as playwright:
-            context = playwright.chromium.launch_persistent_context(
-                user_data_dir=str(profile_dir),
+            context = launch_browser_context(
+                playwright,
+                profile_dir,
                 headless=False,
                 viewport={"width": 1440, "height": 1000},
                 permissions=["clipboard-read", "clipboard-write"],
             )
             try:
+                if has_auth_cookies(context):
+                    context.clear_cookies()
                 page = context.pages[0] if context.pages else context.new_page()
-                page.goto(EDITOR_URL, wait_until="domcontentloaded", timeout=60000)
-                wait_for_login_if_needed(page)
-                set_account_state(account_id, "logged_in", "已检测到 CSDN Markdown 编辑器")
+                page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
+                deadline = time.monotonic() + 180.0
+                while time.monotonic() < deadline:
+                    if page.is_closed():
+                        raise RuntimeError("登录窗口已关闭。")
+                    if has_auth_cookies(context):
+                        break
+                    page.wait_for_timeout(800)
+                if not has_auth_cookies(context):
+                    raise RuntimeError("CSDN 登录未完成或已超时。")
+                page.goto(MANAGE_URL, wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(1500)
+                set_account_state(account_id, "logged_in", f"已登录（{auth_cookie_username(context)}）")
                 log(f"login complete account={account_id!r}")
             finally:
                 context.close()
